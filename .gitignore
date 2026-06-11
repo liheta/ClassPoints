@@ -1,0 +1,17 @@
+.idea/
+.vscode/
+
+release/
+frontend/node_modules/
+cmd/classpoints/dist/
+
+data/
+logs/
+*.db-shm
+*.db-wal
+
+coverage.out
+*.coverprofile
+
+.DS_Store
+Thumbs.db
