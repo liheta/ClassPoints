@@ -48,12 +48,16 @@ func (s *Server) RegisterRoutes(api *gin.RouterGroup) {
 	api.POST("/login", s.login)
 	api.GET("/classes", s.listClasses)
 	api.POST("/classes", s.createClass)
+	api.DELETE("/classes/:classID", s.deleteClass)
 	api.GET("/classes/:classID/dashboard", s.dashboard)
 
 	api.GET("/classes/:classID/students", s.listStudents)
 	api.POST("/classes/:classID/students", s.createStudent)
 	api.PUT("/students/:studentID", s.updateStudent)
 	api.DELETE("/students/:studentID", s.deleteStudent)
+	api.GET("/classes/:classID/groups", s.listStudentGroups)
+	api.POST("/classes/:classID/groups", s.createStudentGroup)
+	api.PUT("/groups/:groupID", s.updateStudentGroup)
 
 	api.GET("/classes/:classID/rules", s.listRules)
 	api.POST("/classes/:classID/rules", s.createRule)
@@ -88,6 +92,15 @@ CREATE TABLE IF NOT EXISTS students (
 	group_name TEXT NOT NULL DEFAULT '',
 	gender TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
+	FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS student_groups (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	class_id INTEGER NOT NULL,
+	name TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	UNIQUE(class_id, name),
 	FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
 );
 
@@ -128,7 +141,25 @@ CREATE TABLE IF NOT EXISTS settings (
 	if err != nil {
 		return err
 	}
-	return s.ensureColumn("students", "gender", "TEXT NOT NULL DEFAULT ''")
+	if err := s.ensureColumn("students", "gender", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("classes", "deleted_at", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("students", "group_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if _, err := s.sql.Exec(`UPDATE students SET group_name = '' WHERE TRIM(group_name) = '未分组'`); err != nil {
+		return err
+	}
+	_, err = s.sql.Exec(`
+INSERT OR IGNORE INTO student_groups(class_id, name, created_at)
+SELECT class_id, TRIM(group_name), MIN(created_at)
+FROM students
+WHERE TRIM(group_name) <> ''
+GROUP BY class_id, TRIM(group_name)`)
+	return err
 }
 
 func (s *Server) ensureColumn(table string, column string, definition string) error {
@@ -136,7 +167,7 @@ func (s *Server) ensureColumn(table string, column string, definition string) er
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	found := false
 	for rows.Next() {
 		var cid int
 		var name string
@@ -148,11 +179,19 @@ func (s *Server) ensureColumn(table string, column string, definition string) er
 			return err
 		}
 		if name == column {
-			return nil
+			found = true
+			break
 		}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
 	}
 	_, err = s.sql.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
 	return err
@@ -185,7 +224,7 @@ func (s *Server) login(c *gin.Context) {
 }
 
 func (s *Server) listClasses(c *gin.Context) {
-	rows, err := s.sql.Query(`SELECT id, name, teacher, created_at FROM classes ORDER BY created_at DESC`)
+	rows, err := s.sql.Query(`SELECT id, name, teacher, created_at FROM classes WHERE deleted_at IS NULL ORDER BY created_at DESC`)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -229,6 +268,50 @@ func (s *Server) createClass(c *gin.Context) {
 	c.JSON(http.StatusCreated, Class{ID: id, Name: req.Name, Teacher: strings.TrimSpace(req.Teacher), CreatedAt: now})
 }
 
+func (s *Server) deleteClass(c *gin.Context) {
+	classID, ok := parseIDParam(c, "classID")
+	if !ok {
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM score_records WHERE class_id = ?`, classID); err != nil {
+		respondError(c, err)
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM students WHERE class_id = ?`, classID); err != nil {
+		respondError(c, err)
+		return
+	}
+	result, err := tx.Exec(`UPDATE classes SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`, formatTime(time.Now()), classID)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if affected == 0 {
+		respondBadRequest(c, "班级不存在或已删除")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		respondError(c, err)
+		return
+	}
+
+	s.afterMutation()
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (s *Server) dashboard(c *gin.Context) {
 	classID, ok := parseIDParam(c, "classID")
 	if !ok {
@@ -239,12 +322,12 @@ func (s *Server) dashboard(c *gin.Context) {
 		respondError(c, err)
 		return
 	}
-	students, err := s.queryRanking(classID, "all")
+	students, err := s.queryRanking(classID, "", "")
 	if err != nil {
 		respondError(c, err)
 		return
 	}
-	recent, err := s.queryRecords(classID, "all", 8)
+	recent, err := s.queryRecords(classID, "all", 0, "", "", 8)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -274,7 +357,7 @@ func (s *Server) dashboard(c *gin.Context) {
 }
 
 func (s *Server) getClass(classID int64) (Class, error) {
-	row := s.sql.QueryRow(`SELECT id, name, teacher, created_at FROM classes WHERE id = ?`, classID)
+	row := s.sql.QueryRow(`SELECT id, name, teacher, created_at FROM classes WHERE id = ? AND deleted_at IS NULL`, classID)
 	return scanClass(row)
 }
 
@@ -297,23 +380,29 @@ func (s *Server) createStudent(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name   string `json:"name"`
-		Code   string `json:"code"`
-		Gender string `json:"gender"`
+		Name      string `json:"name"`
+		Code      string `json:"code"`
+		GroupName string `json:"groupName"`
+		Gender    string `json:"gender"`
 	}
 	if !bindJSON(c, &req) {
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
+	req.GroupName = normalizeGroupName(req.GroupName)
 	if req.Name == "" {
 		respondBadRequest(c, "学生姓名不能为空")
+		return
+	}
+	if err := s.ensureStudentGroup(classID, req.GroupName); err != nil {
+		respondError(c, err)
 		return
 	}
 
 	now := time.Now()
 	result, err := s.sql.Exec(
-		`INSERT INTO students(class_id, name, code, gender, created_at) VALUES(?, ?, ?, ?, ?)`,
-		classID, req.Name, strings.TrimSpace(req.Code), normalizeGender(req.Gender), formatTime(now),
+		`INSERT INTO students(class_id, name, code, group_name, gender, created_at) VALUES(?, ?, ?, ?, ?, ?)`,
+		classID, req.Name, strings.TrimSpace(req.Code), req.GroupName, normalizeGender(req.Gender), formatTime(now),
 	)
 	if err != nil {
 		respondError(c, err)
@@ -321,7 +410,7 @@ func (s *Server) createStudent(c *gin.Context) {
 	}
 	id, _ := result.LastInsertId()
 	s.afterMutation()
-	c.JSON(http.StatusCreated, Student{ID: id, ClassID: classID, Name: req.Name, Code: req.Code, Gender: normalizeGender(req.Gender), CreatedAt: now})
+	c.JSON(http.StatusCreated, Student{ID: id, ClassID: classID, Name: req.Name, Code: strings.TrimSpace(req.Code), GroupName: req.GroupName, Gender: normalizeGender(req.Gender), CreatedAt: now})
 }
 
 func (s *Server) updateStudent(c *gin.Context) {
@@ -330,19 +419,30 @@ func (s *Server) updateStudent(c *gin.Context) {
 		return
 	}
 	var req struct {
-		Name   string `json:"name"`
-		Code   string `json:"code"`
-		Gender string `json:"gender"`
+		Name      string `json:"name"`
+		Code      string `json:"code"`
+		GroupName string `json:"groupName"`
+		Gender    string `json:"gender"`
 	}
 	if !bindJSON(c, &req) {
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
+	req.GroupName = normalizeGroupName(req.GroupName)
 	if req.Name == "" {
 		respondBadRequest(c, "学生姓名不能为空")
 		return
 	}
-	_, err := s.sql.Exec(`UPDATE students SET name = ?, code = ?, gender = ? WHERE id = ?`, req.Name, strings.TrimSpace(req.Code), normalizeGender(req.Gender), studentID)
+	var classID int64
+	if err := s.sql.QueryRow(`SELECT class_id FROM students WHERE id = ?`, studentID).Scan(&classID); err != nil {
+		respondError(c, err)
+		return
+	}
+	if err := s.ensureStudentGroup(classID, req.GroupName); err != nil {
+		respondError(c, err)
+		return
+	}
+	_, err := s.sql.Exec(`UPDATE students SET name = ?, code = ?, group_name = ?, gender = ? WHERE id = ?`, req.Name, strings.TrimSpace(req.Code), req.GroupName, normalizeGender(req.Gender), studentID)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -358,6 +458,118 @@ func (s *Server) deleteStudent(c *gin.Context) {
 	}
 	_, err := s.sql.Exec(`DELETE FROM students WHERE id = ?`, studentID)
 	if err != nil {
+		respondError(c, err)
+		return
+	}
+	s.afterMutation()
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) listStudentGroups(c *gin.Context) {
+	classID, ok := parseIDParam(c, "classID")
+	if !ok {
+		return
+	}
+	groups, err := s.queryStudentGroups(classID)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, groups)
+}
+
+func (s *Server) createStudentGroup(c *gin.Context) {
+	classID, ok := parseIDParam(c, "classID")
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		respondBadRequest(c, "小组名称不能为空")
+		return
+	}
+	if req.Name == "未分组" {
+		respondBadRequest(c, "“未分组”是系统保留名称")
+		return
+	}
+	var count int
+	if err := s.sql.QueryRow(`SELECT COUNT(*) FROM student_groups WHERE class_id = ? AND name = ?`, classID, req.Name).Scan(&count); err != nil {
+		respondError(c, err)
+		return
+	}
+	if count > 0 {
+		respondBadRequest(c, "小组名称已存在")
+		return
+	}
+	now := time.Now()
+	result, err := s.sql.Exec(`INSERT INTO student_groups(class_id, name, created_at) VALUES(?, ?, ?)`, classID, req.Name, formatTime(now))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	id, _ := result.LastInsertId()
+	s.afterMutation()
+	c.JSON(http.StatusCreated, StudentGroup{ID: id, ClassID: classID, Name: req.Name, CreatedAt: now})
+}
+
+func (s *Server) updateStudentGroup(c *gin.Context) {
+	groupID, ok := parseIDParam(c, "groupID")
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !bindJSON(c, &req) {
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		respondBadRequest(c, "小组名称不能为空")
+		return
+	}
+	if req.Name == "未分组" {
+		respondBadRequest(c, "“未分组”是系统保留名称")
+		return
+	}
+
+	var classID int64
+	var oldName string
+	if err := s.sql.QueryRow(`SELECT class_id, name FROM student_groups WHERE id = ?`, groupID).Scan(&classID, &oldName); err != nil {
+		respondError(c, err)
+		return
+	}
+	var count int
+	if err := s.sql.QueryRow(`SELECT COUNT(*) FROM student_groups WHERE class_id = ? AND name = ? AND id <> ?`, classID, req.Name, groupID).Scan(&count); err != nil {
+		respondError(c, err)
+		return
+	}
+	if count > 0 {
+		respondBadRequest(c, "小组名称已存在")
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE student_groups SET name = ? WHERE id = ?`, req.Name, groupID); err != nil {
+		respondError(c, err)
+		return
+	}
+	if _, err := tx.Exec(`UPDATE students SET group_name = ? WHERE class_id = ? AND group_name = ?`, req.Name, classID, oldName); err != nil {
+		respondError(c, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		respondError(c, err)
 		return
 	}
@@ -457,8 +669,22 @@ func (s *Server) listRecords(c *gin.Context) {
 	if !ok {
 		return
 	}
-	filter := c.DefaultQuery("filter", "all")
-	records, err := s.queryRecords(classID, filter, 0)
+	studentID, err := parseOptionalPositiveInt64(c.Query("studentId"))
+	if err != nil {
+		respondBadRequest(c, "学生筛选参数无效")
+		return
+	}
+	startDate := strings.TrimSpace(c.Query("startDate"))
+	endDate := strings.TrimSpace(c.Query("endDate"))
+	if !validOptionalDate(startDate) || !validOptionalDate(endDate) {
+		respondBadRequest(c, "日期格式无效")
+		return
+	}
+	if startDate != "" && endDate != "" && startDate > endDate {
+		respondBadRequest(c, "开始日期不能晚于结束日期")
+		return
+	}
+	records, err := s.queryRecords(classID, c.DefaultQuery("filter", "all"), studentID, startDate, endDate, 0)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -564,7 +790,21 @@ func (s *Server) ranking(c *gin.Context) {
 		return
 	}
 	scope := c.DefaultQuery("scope", "all")
-	ranking, err := s.queryRanking(classID, scope)
+	startDate := strings.TrimSpace(c.Query("startDate"))
+	endDate := strings.TrimSpace(c.Query("endDate"))
+	if scope == "custom" {
+		if !validOptionalDate(startDate) || !validOptionalDate(endDate) {
+			respondBadRequest(c, "日期格式无效")
+			return
+		}
+		if startDate != "" && endDate != "" && startDate > endDate {
+			respondBadRequest(c, "开始日期不能晚于结束日期")
+			return
+		}
+	} else {
+		startDate, endDate = rankingDateRange(scope, time.Now())
+	}
+	ranking, err := s.queryRanking(classID, startDate, endDate)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -699,13 +939,13 @@ func (s *Server) insertRecordWithDB(db dbRunner, classID int64, req recordReques
 
 func (s *Server) queryStudents(classID int64) ([]Student, error) {
 	rows, err := s.sql.Query(`
-SELECT s.id, s.class_id, s.name, s.code, s.gender, s.created_at,
+SELECT s.id, s.class_id, s.name, s.code, s.group_name, s.gender, s.created_at,
        COALESCE(SUM(CASE WHEN r.undone_at IS NULL THEN r.score ELSE 0 END), 0) AS score
 FROM students s
 LEFT JOIN score_records r ON r.student_id = s.id
 WHERE s.class_id = ?
 GROUP BY s.id
-ORDER BY s.gender, s.code, s.name`, classID)
+ORDER BY CASE WHEN TRIM(s.group_name) = '' THEN 1 ELSE 0 END, s.group_name, s.code, s.name`, classID)
 	if err != nil {
 		return nil, err
 	}
@@ -715,13 +955,51 @@ ORDER BY s.gender, s.code, s.name`, classID)
 	for rows.Next() {
 		var student Student
 		var created string
-		if err := rows.Scan(&student.ID, &student.ClassID, &student.Name, &student.Code, &student.Gender, &created, &student.Score); err != nil {
+		if err := rows.Scan(&student.ID, &student.ClassID, &student.Name, &student.Code, &student.GroupName, &student.Gender, &created, &student.Score); err != nil {
 			return nil, err
 		}
 		student.CreatedAt = parseTime(created)
 		students = append(students, student)
 	}
 	return students, rows.Err()
+}
+
+func (s *Server) queryStudentGroups(classID int64) ([]StudentGroup, error) {
+	rows, err := s.sql.Query(`
+SELECT g.id, g.class_id, g.name, g.created_at, COUNT(s.id)
+FROM student_groups g
+LEFT JOIN students s ON s.class_id = g.class_id AND s.group_name = g.name
+WHERE g.class_id = ?
+GROUP BY g.id
+ORDER BY g.id`, classID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	groups := make([]StudentGroup, 0)
+	for rows.Next() {
+		var group StudentGroup
+		var created string
+		if err := rows.Scan(&group.ID, &group.ClassID, &group.Name, &created, &group.StudentCount); err != nil {
+			return nil, err
+		}
+		group.CreatedAt = parseTime(created)
+		groups = append(groups, group)
+	}
+	return groups, rows.Err()
+}
+
+func (s *Server) ensureStudentGroup(classID int64, groupName string) error {
+	groupName = normalizeGroupName(groupName)
+	if groupName == "" {
+		return nil
+	}
+	_, err := s.sql.Exec(
+		`INSERT OR IGNORE INTO student_groups(class_id, name, created_at) VALUES(?, ?, ?)`,
+		classID, groupName, formatTime(time.Now()),
+	)
+	return err
 }
 
 func (s *Server) queryRules(classID int64) ([]Rule, error) {
@@ -746,7 +1024,7 @@ func (s *Server) queryRules(classID int64) ([]Rule, error) {
 	return rules, rows.Err()
 }
 
-func (s *Server) queryRecords(classID int64, filter string, limit int) ([]ScoreRecord, error) {
+func (s *Server) queryRecords(classID int64, filter string, studentID int64, startDate, endDate string, limit int) ([]ScoreRecord, error) {
 	where := []string{"r.class_id = ?"}
 	args := []any{classID}
 	switch filter {
@@ -758,6 +1036,18 @@ func (s *Server) queryRecords(classID int64, filter string, limit int) ([]ScoreR
 		where = append(where, "r.score < 0")
 	case "undone":
 		where = append(where, "r.undone_at IS NOT NULL")
+	}
+	if studentID > 0 {
+		where = append(where, "r.student_id = ?")
+		args = append(args, studentID)
+	}
+	if startDate != "" {
+		where = append(where, "substr(r.created_at, 1, 10) >= ?")
+		args = append(args, startDate)
+	}
+	if endDate != "" {
+		where = append(where, "substr(r.created_at, 1, 10) <= ?")
+		args = append(args, endDate)
 	}
 	query := fmt.Sprintf(`
 SELECT r.id, r.class_id, r.student_id, COALESCE(s.name, '已删除学生'), COALESCE(s.gender, ''), r.rule_id, r.rule_name, r.score, r.reason, r.note, r.created_at, r.undone_at, r.undo_reason
@@ -785,19 +1075,26 @@ ORDER BY r.created_at DESC, r.id DESC`, strings.Join(where, " AND "))
 	return records, rows.Err()
 }
 
-func (s *Server) queryRanking(classID int64, scope string) ([]Student, error) {
-	extraJoin := ""
-	if scope == "today" {
-		extraJoin = "AND date(r.created_at) = date('now', 'localtime')"
+func (s *Server) queryRanking(classID int64, startDate, endDate string) ([]Student, error) {
+	joinConditions := []string{"r.student_id = s.id"}
+	args := make([]any, 0, 3)
+	if startDate != "" {
+		joinConditions = append(joinConditions, "substr(r.created_at, 1, 10) >= ?")
+		args = append(args, startDate)
 	}
+	if endDate != "" {
+		joinConditions = append(joinConditions, "substr(r.created_at, 1, 10) <= ?")
+		args = append(args, endDate)
+	}
+	args = append(args, classID)
 	rows, err := s.sql.Query(fmt.Sprintf(`
 SELECT s.id, s.class_id, s.name, s.code, s.gender, s.created_at,
        COALESCE(SUM(CASE WHEN r.undone_at IS NULL THEN r.score ELSE 0 END), 0) AS score
 FROM students s
-LEFT JOIN score_records r ON r.student_id = s.id %s
+LEFT JOIN score_records r ON %s
 WHERE s.class_id = ?
 GROUP BY s.id
-ORDER BY score DESC, s.gender, s.code, s.name`, extraJoin), classID)
+ORDER BY score DESC, s.gender, s.code, s.name`, strings.Join(joinConditions, " AND ")), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -952,6 +1249,46 @@ func formatTime(value time.Time) string {
 	return value.Format(time.RFC3339)
 }
 
+func parseOptionalPositiveInt64(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 {
+		return 0, errors.New("invalid positive integer")
+	}
+	return parsed, nil
+}
+
+func validOptionalDate(value string) bool {
+	if value == "" {
+		return true
+	}
+	_, err := time.Parse("2006-01-02", value)
+	return err == nil
+}
+
+func rankingDateRange(scope string, now time.Time) (string, string) {
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	endDate := today.Format("2006-01-02")
+	switch scope {
+	case "today":
+		return endDate, endDate
+	case "week":
+		daysSinceMonday := (int(today.Weekday()) + 6) % 7
+		return today.AddDate(0, 0, -daysSinceMonday).Format("2006-01-02"), endDate
+	case "month":
+		return time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, today.Location()).Format("2006-01-02"), endDate
+	case "last7":
+		return today.AddDate(0, 0, -6).Format("2006-01-02"), endDate
+	case "lastMonth":
+		return today.AddDate(0, -1, 0).Format("2006-01-02"), endDate
+	default:
+		return "", ""
+	}
+}
+
 func parseTime(value string) time.Time {
 	parsed, err := time.Parse(time.RFC3339, value)
 	if err != nil {
@@ -968,6 +1305,14 @@ func normalizeGender(value string) string {
 	default:
 		return ""
 	}
+}
+
+func normalizeGroupName(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "未分组" {
+		return ""
+	}
+	return value
 }
 
 func boolToInt(value bool) int {

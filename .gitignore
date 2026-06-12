@@ -12,6 +12,7 @@ logs/
 
 coverage.out
 *.coverprofile
+*_test.go
 
 .DS_Store
 Thumbs.db

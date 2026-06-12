@@ -14,9 +14,18 @@ type Student struct {
 	ClassID   int64     `json:"classId"`
 	Name      string    `json:"name"`
 	Code      string    `json:"code"`
+	GroupName string    `json:"groupName"`
 	Gender    string    `json:"gender"`
 	CreatedAt time.Time `json:"createdAt"`
 	Score     int       `json:"score"`
+}
+
+type StudentGroup struct {
+	ID           int64     `json:"id"`
+	ClassID      int64     `json:"classId"`
+	Name         string    `json:"name"`
+	StudentCount int       `json:"studentCount"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 type Rule struct {

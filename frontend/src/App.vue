@@ -10,7 +10,6 @@ import {
   ClipboardList,
   Download,
   Home,
-  ListPlus,
   LogIn,
   Pencil,
   Plus,
@@ -23,6 +22,7 @@ import {
   Trophy,
   Upload,
   Users,
+  UsersRound,
   X,
 } from "lucide-vue-next";
 import { apiDelete, apiGet, apiPost, apiPut } from "./api";
@@ -33,6 +33,7 @@ const pages = [
   { key: "home", label: "班级首页", icon: Home },
   { key: "classroom", label: "课堂加分", icon: Sparkles },
   { key: "students", label: "学生管理", icon: Users },
+  { key: "groups", label: "小组管理", icon: UsersRound },
   { key: "rules", label: "积分规则", icon: ClipboardList },
   { key: "records", label: "积分记录", icon: BookOpen },
   { key: "ranking", label: "排行榜", icon: Trophy },
@@ -50,6 +51,7 @@ const messageTimer = ref(null);
 const classes = ref([]);
 const dashboard = ref(null);
 const students = ref([]);
+const studentGroups = ref([]);
 const rules = ref([]);
 const records = ref([]);
 const ranking = ref([]);
@@ -59,21 +61,40 @@ const classModal = ref(false);
 const studentModal = ref(false);
 const editingStudentId = ref(null);
 const importModal = ref(false);
+const groupModal = ref(false);
+const editingGroupId = ref(null);
 const ruleModal = ref(false);
 const batchModal = ref(false);
 
 const loginForm = reactive({ name: "老师" });
 const classForm = reactive({ name: "", teacher: "" });
-const studentForm = reactive({ name: "", code: "", gender: "" });
+const studentForm = reactive({ name: "", code: "", groupName: "", gender: "" });
 const importForm = reactive({ text: "" });
+const groupForm = reactive({ name: "" });
 const ruleForm = reactive({ name: "", score: 1, category: "课堂表现" });
-const scoreForm = reactive({ studentId: "", ruleId: "", score: 1, reason: "", note: "" });
 const batchForm = reactive({ studentIds: [], ruleId: "", score: 1, reason: "", note: "" });
 const settingForm = reactive({ schoolName: "", backupDir: "", autoBackupMins: 30, backupKeepCount: 20 });
 
 const studentKeyword = ref("");
 const recordFilter = ref("all");
+const recordStudentId = ref("");
+const recordStartDate = ref("");
+const recordEndDate = ref("");
 const rankScope = ref("all");
+const rankStartDate = ref("");
+const rankEndDate = ref("");
+const draggingStudentId = ref(null);
+const dragTargetGroup = ref("");
+const suppressStudentClick = ref(false);
+
+const rankScopes = [
+  { value: "all", label: "全部" },
+  { value: "today", label: "今日" },
+  { value: "week", label: "本周" },
+  { value: "month", label: "本月" },
+  { value: "last7", label: "最近一周" },
+  { value: "lastMonth", label: "最近一个月" },
+];
 
 const selectedClass = computed(() => safeArray(classes.value).find((item) => item.id === selectedClassId.value));
 const enabledRules = computed(() => safeArray(rules.value).filter((rule) => rule.enabled));
@@ -81,11 +102,30 @@ const filteredStudents = computed(() => {
   const keyword = studentKeyword.value.trim().toLowerCase();
   if (!keyword) return safeArray(students.value);
   return safeArray(students.value).filter((student) => {
-    return `${student.name} ${student.code} ${student.gender}`.toLowerCase().includes(keyword);
+    return `${student.name} ${student.code} ${student.gender} ${student.groupName}`.toLowerCase().includes(keyword);
   });
 });
 const topThree = computed(() => safeArray(ranking.value).slice(0, 3));
 const classroomStudents = computed(() => filteredStudents.value);
+const classroomGroups = computed(() => {
+  const groups = new Map();
+  studentGroups.value.forEach((group) => groups.set(group.name, []));
+  groups.set("未分组", []);
+  classroomStudents.value.forEach((student, index) => {
+    const name = String(student.groupName || "").trim() || "未分组";
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push({ student, index });
+  });
+  return [...groups.entries()].map(([name, items]) => ({ name, items }));
+});
+const selectedClassroomStudents = computed(() => {
+  const selectedIds = new Set(batchForm.studentIds.map(String));
+  return students.value.filter((student) => selectedIds.has(String(student.id)));
+});
+const batchSelectedCount = computed(() => {
+  const studentIds = new Set(safeArray(students.value).map((student) => String(student.id)));
+  return batchForm.studentIds.filter((id) => studentIds.has(String(id))).length;
+});
 const importRows = computed(() => buildImportRows(importForm.text));
 const importReadyRows = computed(() => importRows.value.filter((row) => row.valid && !row.duplicate));
 const importSummary = computed(() => {
@@ -157,6 +197,22 @@ async function createClass() {
   }
 }
 
+async function deleteClass(item) {
+  const confirmed = window.confirm(`确定删除班级“${item.name}”吗？\n\n该班级的所有学生和积分记录将被永久删除，分组和积分规则会保留。`);
+  if (!confirmed) return;
+  try {
+    await apiDelete(`/classes/${item.id}`);
+    classes.value = classes.value.filter((classItem) => classItem.id !== item.id);
+    if (selectedClassId.value === item.id) {
+      selectedClassId.value = 0;
+      localStorage.removeItem("classpoints-class-id");
+    }
+    toast("班级已删除");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 async function selectClass(id) {
   selectedClassId.value = id;
   localStorage.setItem("classpoints-class-id", String(id));
@@ -168,12 +224,13 @@ async function loadClassData() {
   if (!selectedClassId.value) return;
   await run(async () => {
     const id = selectedClassId.value;
-    const [dash, stu, ruleList, recordList, rank] = await Promise.all([
+    const [dash, stu, groupList, ruleList, recordList, rank] = await Promise.all([
       apiGet(`/classes/${id}/dashboard`),
       apiGet(`/classes/${id}/students`),
+      apiGet(`/classes/${id}/groups`),
       apiGet(`/classes/${id}/rules`),
-      apiGet(`/classes/${id}/records?filter=${recordFilter.value}`),
-      apiGet(`/classes/${id}/ranking?scope=${rankScope.value}`),
+      apiGet(`/classes/${id}/records?${buildRecordQuery()}`),
+      apiGet(`/classes/${id}/ranking?${buildRankingQuery()}`),
     ]);
     dashboard.value = {
       ...dash,
@@ -181,6 +238,7 @@ async function loadClassData() {
       ranking: safeArray(dash?.ranking),
     };
     students.value = safeArray(stu);
+    studentGroups.value = safeArray(groupList);
     rules.value = safeArray(ruleList);
     records.value = safeArray(recordList);
     ranking.value = safeArray(rank);
@@ -190,17 +248,141 @@ async function loadClassData() {
 
 async function loadRecords() {
   if (!selectedClassId.value) return;
-  records.value = safeArray(await apiGet(`/classes/${selectedClassId.value}/records?filter=${recordFilter.value}`));
+  records.value = safeArray(await apiGet(`/classes/${selectedClassId.value}/records?${buildRecordQuery()}`));
+}
+
+function buildRecordQuery() {
+  const params = new URLSearchParams({ filter: recordFilter.value });
+  if (recordStudentId.value) params.set("studentId", recordStudentId.value);
+  if (recordStartDate.value) params.set("startDate", recordStartDate.value);
+  if (recordEndDate.value) params.set("endDate", recordEndDate.value);
+  return params.toString();
+}
+
+function clearRecordFilters() {
+  recordFilter.value = "all";
+  recordStudentId.value = "";
+  recordStartDate.value = "";
+  recordEndDate.value = "";
+}
+
+async function resetRecordFilters() {
+  clearRecordFilters();
+  await loadRecords();
+}
+
+function exportRecordsExcel() {
+  if (!records.value.length) return toast("当前筛选条件下没有可导出的积分记录");
+
+  const headers = ["序号", "学生姓名", "性别", "积分规则", "分值", "原因", "备注", "记录状态", "撤销原因", "记录时间"];
+  const rows = records.value.map((record, index) => [
+    index + 1,
+    record.studentName,
+    record.gender || "",
+    record.ruleName || "自定义",
+    Number(record.score || 0),
+    record.reason,
+    record.note || "",
+    record.effective ? "有效" : "已撤销",
+    record.undoReason || "",
+    formatExportDate(record.createdAt),
+  ]);
+  const worksheetRows = [headers, ...rows]
+    .map((row, rowIndex) => {
+      const cells = row.map((value) => {
+        const type = typeof value === "number" ? "Number" : "String";
+        const style = rowIndex === 0 ? ' ss:StyleID="Header"' : "";
+        return `<Cell${style}><Data ss:Type="${type}">${escapeExcelXML(value)}</Data></Cell>`;
+      });
+      return `<Row>${cells.join("")}</Row>`;
+    })
+    .join("");
+  const workbook = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Styles>
+  <Style ss:ID="Default"><Alignment ss:Vertical="Center"/><Font ss:FontName="Microsoft YaHei" ss:Size="11"/></Style>
+  <Style ss:ID="Header"><Alignment ss:Horizontal="Center" ss:Vertical="Center"/><Font ss:FontName="Microsoft YaHei" ss:Size="11" ss:Bold="1"/><Interior ss:Color="#EDE9FE" ss:Pattern="Solid"/></Style>
+ </Styles>
+ <Worksheet ss:Name="积分记录"><Table>${worksheetRows}</Table></Worksheet>
+</Workbook>`;
+  const blob = new Blob([workbook], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const className = sanitizeFileName(selectedClass.value?.name || "班级");
+  link.href = url;
+  link.download = `${className}-积分记录-${localDateText(new Date())}.xls`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  toast(`已导出 ${records.value.length} 条积分记录`);
+}
+
+function escapeExcelXML(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function sanitizeFileName(value) {
+  return String(value || "班级").replace(/[\\/:*?"<>|]/g, "-").trim() || "班级";
+}
+
+function localDateText(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+function formatExportDate(value) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
 }
 
 async function loadRanking() {
   if (!selectedClassId.value) return;
-  ranking.value = safeArray(await apiGet(`/classes/${selectedClassId.value}/ranking?scope=${rankScope.value}`));
+  ranking.value = safeArray(await apiGet(`/classes/${selectedClassId.value}/ranking?${buildRankingQuery()}`));
+}
+
+function buildRankingQuery() {
+  const params = new URLSearchParams({ scope: rankScope.value });
+  if (rankScope.value === "custom") {
+    if (rankStartDate.value) params.set("startDate", rankStartDate.value);
+    if (rankEndDate.value) params.set("endDate", rankEndDate.value);
+  }
+  return params.toString();
+}
+
+async function selectRankScope(scope) {
+  rankScope.value = scope;
+  await loadRanking();
+}
+
+async function applyCustomRankingDates() {
+  if (rankStartDate.value && rankEndDate.value && rankStartDate.value > rankEndDate.value) {
+    return toast("开始日期不能晚于结束日期");
+  }
+  rankScope.value = "custom";
+  await loadRanking();
 }
 
 function ensureScoreDefaults() {
-  if (!scoreForm.studentId && students.value.length) scoreForm.studentId = String(students.value[0].id);
-  if (!scoreForm.ruleId && enabledRules.value.length) applyRuleToForm(scoreForm, enabledRules.value[0].id);
   if (!batchForm.ruleId && enabledRules.value.length) applyRuleToForm(batchForm, enabledRules.value[0].id);
 }
 
@@ -214,7 +396,7 @@ function applyRuleToForm(form, ruleId) {
 
 function openCreateStudent() {
   editingStudentId.value = null;
-  Object.assign(studentForm, { name: "", code: "", gender: "" });
+  Object.assign(studentForm, { name: "", code: "", groupName: "", gender: "" });
   studentModal.value = true;
 }
 
@@ -223,6 +405,7 @@ function openEditStudent(student) {
   Object.assign(studentForm, {
     name: student.name || "",
     code: student.code || "",
+    groupName: student.groupName || "",
     gender: student.gender || "",
   });
   studentModal.value = true;
@@ -231,7 +414,7 @@ function openEditStudent(student) {
 function closeStudentModal() {
   studentModal.value = false;
   editingStudentId.value = null;
-  Object.assign(studentForm, { name: "", code: "", gender: "" });
+  Object.assign(studentForm, { name: "", code: "", groupName: "", gender: "" });
 }
 
 function openImportStudents() {
@@ -287,6 +470,7 @@ async function importStudents() {
       await apiPost(`/classes/${selectedClassId.value}/students`, {
         name: row.name,
         code: row.code,
+        groupName: row.groupName,
         gender: row.gender,
       });
       success += 1;
@@ -305,6 +489,42 @@ async function deleteStudent(student) {
     await apiDelete(`/students/${student.id}`);
     await loadClassData();
     toast("学生已删除");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function openCreateGroup() {
+  editingGroupId.value = null;
+  groupForm.name = "";
+  groupModal.value = true;
+}
+
+function openEditGroup(group) {
+  editingGroupId.value = group.id;
+  groupForm.name = group.name;
+  groupModal.value = true;
+}
+
+function closeGroupModal() {
+  groupModal.value = false;
+  editingGroupId.value = null;
+  groupForm.name = "";
+}
+
+async function saveStudentGroup() {
+  const name = groupForm.name.trim();
+  if (!name) return toast("请输入小组名称");
+  try {
+    if (editingGroupId.value) {
+      await apiPut(`/groups/${editingGroupId.value}`, { name });
+      toast("小组名称已更新");
+    } else {
+      await apiPost(`/classes/${selectedClassId.value}/groups`, { name });
+      toast("小组已创建");
+    }
+    closeGroupModal();
+    await loadClassData();
   } catch (error) {
     toast(error.message);
   }
@@ -343,41 +563,81 @@ async function deleteRule(rule) {
   }
 }
 
-async function createRecord() {
-  if (!scoreForm.studentId) return toast("请选择学生");
-  if (!scoreForm.reason.trim()) return toast("请输入原因");
+function handleStudentCardClick(student) {
+  if (suppressStudentClick.value) return;
+  const studentID = String(student.id);
+  if (batchForm.studentIds.includes(studentID)) {
+    batchForm.studentIds = batchForm.studentIds.filter((id) => id !== studentID);
+  } else {
+    batchForm.studentIds = [...batchForm.studentIds, studentID];
+  }
+}
+
+function startStudentDrag(event, student) {
+  draggingStudentId.value = student.id;
+  suppressStudentClick.value = true;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", String(student.id));
+}
+
+function finishStudentDrag() {
+  draggingStudentId.value = null;
+  dragTargetGroup.value = "";
+  window.setTimeout(() => {
+    suppressStudentClick.value = false;
+  }, 0);
+}
+
+async function moveStudentToGroup(studentID, groupName) {
+  const student = students.value.find((item) => item.id === Number(studentID));
+  if (!student) return;
+  const nextGroupName = groupName === "未分组" ? "" : groupName;
+  if ((student.groupName || "") === nextGroupName) return;
+
   try {
-    await apiPost(`/classes/${selectedClassId.value}/records`, {
-      studentId: Number(scoreForm.studentId),
-      ruleId: scoreForm.ruleId ? Number(scoreForm.ruleId) : null,
-      score: Number(scoreForm.score),
-      reason: scoreForm.reason,
-      note: scoreForm.note,
+    await apiPut(`/students/${student.id}`, {
+      name: student.name,
+      code: student.code,
+      gender: student.gender,
+      groupName: nextGroupName,
     });
-    scoreForm.note = "";
-    recordFilter.value = "all";
     await loadClassData();
-    toast("积分已写入 SQLite");
+    toast(`已将「${student.name}」移动到${nextGroupName ? `「${nextGroupName}」` : "未分组"}`);
   } catch (error) {
     toast(error.message);
   }
 }
 
-async function addScoreForStudent(student) {
-  scoreForm.studentId = String(student.id);
-  if (scoreForm.ruleId && !scoreForm.reason.trim()) {
-    applyRuleToForm(scoreForm, scoreForm.ruleId);
-  }
-  if (!scoreForm.reason.trim()) return toast("请先选择规则或填写原因");
-  await createRecord();
+async function dropStudentOnGroup(event, groupName) {
+  const studentID = Number(event.dataTransfer.getData("text/plain") || draggingStudentId.value);
+  dragTargetGroup.value = "";
+  if (!studentID) return;
+  await moveStudentToGroup(studentID, groupName);
+}
+
+function openBatchScore(selectAll = false) {
+  if (selectAll) batchForm.studentIds = students.value.map((student) => String(student.id));
+  if (!batchSelectedCount.value) return toast("请先选择学生");
+  if (!batchForm.ruleId && enabledRules.value.length) applyRuleToForm(batchForm, enabledRules.value[0].id);
+  batchModal.value = true;
+}
+
+function closeBatchScore() {
+  batchModal.value = false;
+}
+
+function clearClassroomSelection() {
+  batchForm.studentIds = [];
 }
 
 async function createBatchRecords() {
-  if (!batchForm.studentIds.length) return toast("请选择学生");
+  const validStudentIds = new Set(students.value.map((student) => Number(student.id)));
+  const studentIds = [...new Set(batchForm.studentIds.map(Number))].filter((id) => validStudentIds.has(id));
+  if (!studentIds.length) return toast("请选择学生");
   if (!batchForm.reason.trim()) return toast("请输入原因");
   try {
     await apiPost(`/classes/${selectedClassId.value}/records/batch`, {
-      studentIds: batchForm.studentIds.map(Number),
+      studentIds,
       ruleId: batchForm.ruleId ? Number(batchForm.ruleId) : null,
       score: Number(batchForm.score),
       reason: batchForm.reason,
@@ -385,9 +645,9 @@ async function createBatchRecords() {
     });
     batchModal.value = false;
     Object.assign(batchForm, { studentIds: [], ruleId: batchForm.ruleId, score: batchForm.score, reason: batchForm.reason, note: "" });
-    recordFilter.value = "all";
+    clearRecordFilters();
     await loadClassData();
-    toast("批量加分已完成");
+    toast(`已为 ${studentIds.length} 名学生批量加分`);
   } catch (error) {
     toast(error.message);
   }
@@ -441,7 +701,7 @@ async function goPage(page) {
   activePage.value = page;
   if (page === "settings") await loadSettings();
   if (page === "records") {
-    recordFilter.value = "all";
+    clearRecordFilters();
     await loadRecords();
   }
   if (page === "ranking") await loadRanking();
@@ -521,6 +781,7 @@ function parseStudentImportText(text) {
   let codeIndex = 0;
   let nameIndex = 1;
   let genderIndex = 2;
+  let groupIndex = 3;
   let startIndex = 0;
 
   if (headerIndex >= 0) {
@@ -528,6 +789,7 @@ function parseStudentImportText(text) {
     codeIndex = findHeaderIndex(header, isCodeHeader, 0);
     nameIndex = findHeaderIndex(header, isStudentNameHeader, 1);
     genderIndex = findHeaderIndex(header, isGenderHeader, 2);
+    groupIndex = findHeaderIndex(header, isGroupHeader, 3);
     startIndex = headerIndex + 1;
   }
 
@@ -537,9 +799,10 @@ function parseStudentImportText(text) {
     const code = cleanImportCell(cells[codeIndex] || "");
     const name = cleanImportCell(cells[nameIndex] || "");
     const gender = normalizeImportGender(cells[genderIndex] || "");
-    if (!code && !name && !gender) continue;
-    if (cells.length === 1 && !name && !gender) continue;
-    rows.push({ line: index + 1, code, name, gender });
+    const groupName = cleanImportCell(cells[groupIndex] || "");
+    if (!code && !name && !gender && !groupName) continue;
+    if (cells.length === 1 && !name && !gender && !groupName) continue;
+    rows.push({ line: index + 1, code, name, gender, groupName });
   }
   return rows;
 }
@@ -583,6 +846,10 @@ function isGenderHeader(value) {
   return ["性别", "男/女"].includes(cleanImportCell(value));
 }
 
+function isGroupHeader(value) {
+  return ["分组", "小组", "组别", "组名"].includes(cleanImportCell(value));
+}
+
 function normalizeImportGender(value) {
   const text = cleanImportCell(value);
   if (text === "男" || text === "女") return text;
@@ -616,7 +883,7 @@ function formatDate(value) {
       <div class="mark">
         <Award />
       </div>
-      <p class="eyebrow">完全离线 · 本地 SQLite</p>
+      <p class="eyebrow">一起学习，一起闪闪发光</p>
       <h1>班级积分系统</h1>
       <form @submit.prevent="login">
         <label>
@@ -625,7 +892,7 @@ function formatDate(value) {
         </label>
         <button class="primary wide" type="submit">
           <LogIn />
-          登录
+          进入班级乐园
         </button>
       </form>
     </section>
@@ -636,7 +903,7 @@ function formatDate(value) {
       <div class="brand">
         <div class="brand-logo"><Award /></div>
         <div>
-          <p>班级积分系统</p>
+          <p>快乐成长积分站</p>
           <strong>{{ selectedClass?.name || "我的班级" }}</strong>
         </div>
       </div>
@@ -659,8 +926,8 @@ function formatDate(value) {
       </div>
     </aside>
 
-    <section class="content">
-      <header class="topbar">
+    <section class="content" :class="{ 'classroom-content': activePage === 'classroom' }">
+      <header class="topbar" :class="{ 'classroom-topbar': activePage === 'classroom' }">
         <div>
           <p class="eyebrow">{{ selectedClass?.teacher || "本地浏览器访问" }}</p>
           <h1>{{ activePage === "classes" ? "我的班级" : selectedClass?.name }}</h1>
@@ -691,7 +958,10 @@ function formatDate(value) {
               <h2>{{ item.name }}</h2>
               <p>{{ item.teacher || "未填写老师" }}</p>
             </div>
-            <button class="ghost" type="button">进入</button>
+            <div class="class-card-actions">
+              <button class="ghost danger" type="button" @click.stop="deleteClass(item)"><Trash2 />删除</button>
+              <button class="ghost" type="button">进入</button>
+            </div>
           </article>
         </div>
       </section>
@@ -731,7 +1001,7 @@ function formatDate(value) {
       <section v-if="activePage === 'classroom'" class="page classroom-page">
         <section class="classroom-toolbar">
           <div>
-            <p class="eyebrow">点选学生卡片，按当前规则快速加分</p>
+            <p class="eyebrow">先选择学生，再选择加分操作并确认提交</p>
             <h2>课堂加分</h2>
           </div>
           <div class="classroom-actions">
@@ -739,72 +1009,82 @@ function formatDate(value) {
               <Search />
               <input v-model="studentKeyword" placeholder="搜索姓名或学号" />
             </div>
-            <button class="secondary" type="button" @click="batchModal = true">
-              <ListPlus />
-              批量加分
+            <button class="primary" type="button" :disabled="!students.length" @click="openBatchScore(true)">
+              <Users />
+              全班加分
             </button>
           </div>
         </section>
 
-        <section class="quick-score-panel">
-          <div class="quick-rule-row">
-            <button
-              v-for="rule in enabledRules"
-              :key="rule.id"
-              :class="{ active: scoreForm.ruleId === String(rule.id) }"
-              type="button"
-              @click="applyRuleToForm(scoreForm, rule.id)"
-            >
-              <span>{{ rule.name }}</span>
-              <strong>{{ formatScore(rule.score) }}</strong>
-            </button>
-            <button :class="{ active: !scoreForm.ruleId }" type="button" @click="scoreForm.ruleId = ''">
-              <span>自定义</span>
-              <strong>{{ formatScore(scoreForm.score) }}</strong>
+        <section class="classroom-selection-bar" :class="{ active: batchSelectedCount }">
+          <div>
+            <strong v-if="batchSelectedCount">已选择 {{ batchSelectedCount }} 名学生</strong>
+            <strong v-else>请点击学生卡片进行选择</strong>
+            <span>{{ batchSelectedCount ? selectedClassroomStudents.map((student) => student.name).join("、") : "可连续选择多名学生" }}</span>
+          </div>
+          <div class="selection-actions">
+            <button v-if="batchSelectedCount" class="ghost small" type="button" @click="clearClassroomSelection">清空选择</button>
+            <button class="primary" type="button" :disabled="!batchSelectedCount" @click="openBatchScore(false)">
+              <Sparkles />选择加分操作
             </button>
           </div>
-          <form class="quick-custom-form" @submit.prevent="createRecord">
-            <label>
-              分值
-              <input v-model.number="scoreForm.score" type="number" step="1" />
-            </label>
-            <label>
-              原因
-              <input v-model="scoreForm.reason" placeholder="如：积极发言" />
-            </label>
-            <label>
-              备注
-              <input v-model="scoreForm.note" placeholder="可选" />
-            </label>
-            <button class="primary" type="submit">
-              <Save />
-              手动写入
-            </button>
-          </form>
         </section>
 
-        <section class="student-card-grid" aria-label="学生积分卡片">
-          <button
-            v-for="(student, index) in classroomStudents"
-            :key="student.id"
-            class="student-score-card"
-            :class="{ selected: scoreForm.studentId === String(student.id) }"
-            type="button"
-            @click="addScoreForStudent(student)"
+        <section class="student-groups" aria-label="分组学生积分卡片">
+          <p class="drag-group-tip"><UsersRound />按住学生卡片，拖到其他小组即可调整分组</p>
+          <section
+            v-for="group in classroomGroups"
+            :key="group.name"
+            class="student-group-section"
+            :class="{ 'drop-target': draggingStudentId && dragTargetGroup === group.name }"
+            @dragover.prevent="dragTargetGroup = group.name"
+            @drop.prevent="dropStudentOnGroup($event, group.name)"
           >
-            <span class="student-no">{{ studentNumber(student, index) }}号</span>
-            <span class="cartoon-avatar" :class="avatarClass(student, index)" aria-hidden="true">
-              <span class="avatar-hair"></span>
-              <span class="avatar-face">
-                <span class="avatar-eye left"></span>
-                <span class="avatar-eye right"></span>
-                <span class="avatar-smile"></span>
-              </span>
-              <span class="avatar-body"></span>
-            </span>
-            <strong>{{ student.name }}</strong>
-            <em :class="{ negative: student.score < 0 }">{{ formatTotalScore(student.score) }}</em>
-          </button>
+            <header class="student-group-title">
+              <h3>{{ group.name }}</h3>
+              <span>{{ group.items.length }} 人</span>
+            </header>
+            <div class="student-card-grid">
+              <div v-if="!group.items.length" class="empty-group-drop">将学生拖到这里</div>
+              <button
+                v-for="item in group.items"
+                :key="item.student.id"
+                class="student-score-card"
+                :class="{
+                  selected: batchForm.studentIds.includes(String(item.student.id)),
+                  dragging: draggingStudentId === item.student.id,
+                }"
+                draggable="true"
+                :aria-pressed="batchForm.studentIds.includes(String(item.student.id))"
+                :title="`点击选择 ${item.student.name}，拖动可调整分组`"
+                type="button"
+                @click="handleStudentCardClick(item.student)"
+                @dragstart="startStudentDrag($event, item.student)"
+                @dragend="finishStudentDrag"
+              >
+                <span class="student-no">{{ studentNumber(item.student, item.index) }}号</span>
+                <span class="cartoon-avatar" :class="avatarClass(item.student, item.index)" aria-hidden="true">
+                  <span class="avatar-ear left"></span>
+                  <span class="avatar-ear right"></span>
+                  <span class="avatar-hair-back"></span>
+                  <span class="avatar-hair"></span>
+                  <span class="avatar-accessory left"></span>
+                  <span class="avatar-accessory right"></span>
+                  <span class="avatar-face">
+                    <span class="avatar-eye left"></span>
+                    <span class="avatar-eye right"></span>
+                    <span class="avatar-blush left"></span>
+                    <span class="avatar-blush right"></span>
+                    <span class="avatar-smile"></span>
+                  </span>
+                  <span class="avatar-body"><span class="avatar-collar"></span></span>
+                </span>
+                <strong>{{ item.student.name }}</strong>
+                <em :class="{ negative: item.student.score < 0 }">{{ formatTotalScore(item.student.score) }}</em>
+                <span v-if="batchForm.studentIds.includes(String(item.student.id))" class="student-selected-mark"><Check /></span>
+              </button>
+            </div>
+          </section>
           <div v-if="!classroomStudents.length" class="empty compact">暂无匹配学生</div>
         </section>
       </section>
@@ -826,14 +1106,15 @@ function formatDate(value) {
           </div>
           <div class="search-box">
             <Search />
-            <input v-model="studentKeyword" placeholder="搜索姓名、性别或学号" />
+            <input v-model="studentKeyword" placeholder="搜索姓名、分组、性别或学号" />
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>姓名</th><th>性别</th><th>学号</th><th>积分</th><th>操作</th></tr></thead>
+              <thead><tr><th>姓名</th><th>分组</th><th>性别</th><th>学号</th><th>积分</th><th>操作</th></tr></thead>
               <tbody>
                 <tr v-for="student in filteredStudents" :key="student.id">
                   <td>{{ student.name }}</td>
+                  <td>{{ student.groupName || "未分组" }}</td>
                   <td>{{ student.gender || "-" }}</td>
                   <td>{{ student.code || "-" }}</td>
                   <td><strong :class="{ negative: student.score < 0 }">{{ formatScore(student.score) }}</strong></td>
@@ -846,6 +1127,36 @@ function formatDate(value) {
                 </tr>
               </tbody>
             </table>
+          </div>
+        </section>
+      </section>
+
+      <section v-if="activePage === 'groups'" class="page">
+        <section class="panel">
+          <div class="panel-title">
+            <div>
+              <h2>小组管理</h2>
+              <span>创建小组后，可在学生管理中为学生选择所属小组</span>
+            </div>
+            <button class="primary" type="button" @click="openCreateGroup">
+              <CirclePlus />
+              新增小组
+            </button>
+          </div>
+          <div v-if="studentGroups.length" class="group-card-grid">
+            <article v-for="(group, index) in studentGroups" :key="group.id" class="group-manage-card">
+              <div class="group-card-icon" :class="`variant-${index % 4}`"><UsersRound /></div>
+              <div class="group-card-content">
+                <h3>{{ group.name }}</h3>
+                <span>{{ group.studentCount }} 名学生</span>
+              </div>
+              <button class="ghost small" type="button" @click="openEditGroup(group)"><Pencil />编辑</button>
+            </article>
+          </div>
+          <div v-else class="empty compact">
+            <UsersRound />
+            <strong>还没有小组</strong>
+            <span>可以创建星星组、月亮组等小组。</span>
           </div>
         </section>
       </section>
@@ -877,8 +1188,33 @@ function formatDate(value) {
         <section class="panel">
           <div class="panel-title">
             <h2>积分记录</h2>
-            <div class="record-toolbar">
+            <div class="record-title-actions">
               <span>{{ records.length }} 条</span>
+              <button class="secondary" type="button" :disabled="!records.length" @click="exportRecordsExcel">
+                <Download />导出 Excel
+              </button>
+            </div>
+          </div>
+          <div class="record-filter-bar">
+            <label>
+              学生
+              <select v-model="recordStudentId" @change="loadRecords">
+                <option value="">全部学生</option>
+                <option v-for="student in students" :key="student.id" :value="String(student.id)">
+                  {{ student.name }}<template v-if="student.code">（{{ student.code }}）</template>
+                </option>
+              </select>
+            </label>
+            <label>
+              开始日期
+              <input v-model="recordStartDate" type="date" :max="recordEndDate || undefined" @change="loadRecords" />
+            </label>
+            <label>
+              结束日期
+              <input v-model="recordEndDate" type="date" :min="recordStartDate || undefined" @change="loadRecords" />
+            </label>
+            <label>
+              记录类型
               <select v-model="recordFilter" @change="loadRecords">
                 <option value="all">全部记录</option>
                 <option value="today">今日记录</option>
@@ -886,7 +1222,8 @@ function formatDate(value) {
                 <option value="negative">只看扣分</option>
                 <option value="undone">已撤销</option>
               </select>
-            </div>
+            </label>
+            <button class="ghost record-reset" type="button" @click="resetRecordFilters">重置筛选</button>
           </div>
           <RecordList :records="records" @undo="undoRecord" />
         </section>
@@ -896,9 +1233,33 @@ function formatDate(value) {
         <section class="panel">
           <div class="panel-title">
             <h2>排行榜</h2>
-            <div class="segmented">
-              <button :class="{ active: rankScope === 'all' }" type="button" @click="rankScope = 'all'; loadRanking()">全部</button>
-              <button :class="{ active: rankScope === 'today' }" type="button" @click="rankScope = 'today'; loadRanking()">今日</button>
+          </div>
+          <div class="ranking-filter-bar">
+            <div class="ranking-quick-filters">
+              <span>快捷筛选</span>
+              <button
+                v-for="scope in rankScopes"
+                :key="scope.value"
+                class="ghost small"
+                :class="{ active: rankScope === scope.value }"
+                type="button"
+                @click="selectRankScope(scope.value)"
+              >
+                {{ scope.label }}
+              </button>
+            </div>
+            <div class="ranking-date-filters">
+              <label>
+                开始日期
+                <input v-model="rankStartDate" type="date" :max="rankEndDate || undefined" />
+              </label>
+              <label>
+                结束日期
+                <input v-model="rankEndDate" type="date" :min="rankStartDate || undefined" />
+              </label>
+              <button class="primary" :class="{ active: rankScope === 'custom' }" type="button" @click="applyCustomRankingDates">
+                按日期筛选
+              </button>
             </div>
           </div>
           <div class="table-wrap">
@@ -968,6 +1329,13 @@ function formatDate(value) {
       <header><h2>{{ editingStudentId ? "编辑学生" : "新增学生" }}</h2><button class="icon" type="button" @click="closeStudentModal"><X /></button></header>
       <label>姓名<input v-model="studentForm.name" autocomplete="off" /></label>
       <label>
+        分组
+        <select v-model="studentForm.groupName">
+          <option value="">未分组</option>
+          <option v-for="group in studentGroups" :key="group.id" :value="group.name">{{ group.name }}</option>
+        </select>
+      </label>
+      <label>
         性别
         <select v-model="studentForm.gender">
           <option value="">未填写</option>
@@ -980,13 +1348,24 @@ function formatDate(value) {
     </form>
   </div>
 
+  <div v-if="groupModal" class="modal-backdrop">
+    <form class="modal" @submit.prevent="saveStudentGroup">
+      <header>
+        <h2>{{ editingGroupId ? "编辑小组" : "新增小组" }}</h2>
+        <button class="icon" type="button" @click="closeGroupModal"><X /></button>
+      </header>
+      <label>小组名称<input v-model="groupForm.name" autocomplete="off" placeholder="如：星星组" /></label>
+      <button class="primary wide" type="submit"><Check />保存</button>
+    </form>
+  </div>
+
   <div v-if="importModal" class="modal-backdrop">
     <form class="modal wide-modal" @submit.prevent="importStudents">
       <header><h2>导入学生</h2><button class="icon" type="button" @click="closeImportStudents"><X /></button></header>
       <div class="import-source">
         <label class="full">
           粘贴名单
-          <textarea v-model="importForm.text" rows="8" placeholder="从 Excel 复制包含「学号、学生、性别」的表格区域后粘贴到这里"></textarea>
+          <textarea v-model="importForm.text" rows="8" placeholder="从 Excel 复制包含「学号、学生、性别、分组」的表格区域后粘贴到这里"></textarea>
         </label>
         <label class="file-picker">
           <Upload />
@@ -1002,14 +1381,15 @@ function formatDate(value) {
       </div>
       <div class="table-wrap import-preview">
         <table>
-          <thead><tr><th>行号</th><th>学号</th><th>姓名</th><th>性别</th><th>状态</th></tr></thead>
+          <thead><tr><th>行号</th><th>学号</th><th>姓名</th><th>性别</th><th>分组</th><th>状态</th></tr></thead>
           <tbody>
-            <tr v-if="!importRows.length"><td colspan="5">暂无可预览内容</td></tr>
+            <tr v-if="!importRows.length"><td colspan="6">暂无可预览内容</td></tr>
             <tr v-for="row in importRows" :key="row.line" :class="{ muted: row.duplicate || !row.valid }">
               <td>{{ row.line }}</td>
               <td>{{ row.code || "-" }}</td>
               <td>{{ row.name || "-" }}</td>
               <td>{{ row.gender || "-" }}</td>
+              <td>{{ row.groupName || "未分组" }}</td>
               <td>{{ row.status }}</td>
             </tr>
           </tbody>
@@ -1031,13 +1411,29 @@ function formatDate(value) {
 
   <div v-if="batchModal" class="modal-backdrop">
     <form class="modal wide-modal" @submit.prevent="createBatchRecords">
-      <header><h2>批量加分</h2><button class="icon" type="button" @click="batchModal = false"><X /></button></header>
-      <div class="student-pick-grid">
-        <label v-for="student in students" :key="student.id" class="check-card">
-          <input v-model="batchForm.studentIds" type="checkbox" :value="String(student.id)" />
-          <span>{{ student.name }}</span>
-          <em>{{ student.gender || "未填写性别" }}</em>
-        </label>
+      <header><h2>选择加分操作</h2><button class="icon" type="button" @click="closeBatchScore"><X /></button></header>
+      <div class="batch-selection-toolbar">
+        <span>本次将为 {{ batchSelectedCount }} 名学生加分</span>
+        <button class="ghost small" type="button" @click="closeBatchScore">返回修改选择</button>
+      </div>
+      <div class="selected-student-chips">
+        <span v-for="student in selectedClassroomStudents" :key="student.id">{{ student.name }}</span>
+      </div>
+      <div class="score-operation-rules">
+        <button
+          v-for="rule in enabledRules"
+          :key="rule.id"
+          :class="{ active: batchForm.ruleId === String(rule.id) }"
+          type="button"
+          @click="applyRuleToForm(batchForm, rule.id)"
+        >
+          <span>{{ rule.name }}</span>
+          <strong>{{ formatScore(rule.score) }}</strong>
+        </button>
+        <button :class="{ active: !batchForm.ruleId }" type="button" @click="batchForm.ruleId = ''">
+          <span>自定义</span>
+          <strong>{{ formatScore(batchForm.score) }}</strong>
+        </button>
       </div>
       <div class="form-grid">
         <label>
@@ -1053,7 +1449,9 @@ function formatDate(value) {
         <label class="full">原因<input v-model="batchForm.reason" autocomplete="off" /></label>
         <label class="full">备注<textarea v-model="batchForm.note" rows="2"></textarea></label>
       </div>
-      <button class="primary wide" type="submit"><Upload />批量写入</button>
+      <button class="primary wide score-submit-button" type="submit" :disabled="!batchSelectedCount">
+        <Check />确认提交，为 {{ batchSelectedCount }} 名学生加分
+      </button>
     </form>
   </div>
 
