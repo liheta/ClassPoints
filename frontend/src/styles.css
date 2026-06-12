@@ -113,7 +113,6 @@ svg {
 }
 
 .login-panel h1,
-.topbar h1,
 .panel-title h2,
 .class-card h2,
 .rule-card h3 {
@@ -190,8 +189,6 @@ svg {
 .class-switch,
 .nav button,
 .sidebar-footer,
-.topbar,
-.top-actions,
 .panel-title,
 .record-main,
 .record-side,
@@ -250,33 +247,14 @@ svg {
   padding: 28px 32px 36px;
 }
 
-.topbar,
 .panel-title {
   justify-content: space-between;
   gap: 16px;
 }
 
-.topbar {
-  min-height: 76px;
-  margin-bottom: 22px;
-  border: 2px solid rgba(255, 255, 255, 0.8);
-  border-radius: 22px;
-  background: rgba(255, 255, 255, 0.74);
-  box-shadow: 0 12px 28px rgba(94, 82, 164, 0.08);
-  padding: 14px 18px;
-  backdrop-filter: blur(10px);
-}
-
-.topbar h1 {
-  color: #45416c;
-  font-size: clamp(28px, 2.4vw, 38px);
-  line-height: 1.2;
-}
-
-.top-actions {
-  flex-wrap: wrap;
+.classes-page-actions {
+  display: flex;
   justify-content: flex-end;
-  gap: 8px;
 }
 
 .page {
@@ -562,17 +540,6 @@ textarea:focus {
   padding-top: 18px;
   padding-right: 22px;
   padding-left: 22px;
-}
-
-.topbar.classroom-topbar {
-  min-height: 64px;
-  margin-bottom: 12px;
-  border-radius: 18px;
-  padding: 9px 16px;
-}
-
-.topbar.classroom-topbar h1 {
-  font-size: clamp(25px, 2vw, 32px);
 }
 
 .classroom-toolbar {
@@ -2053,7 +2020,6 @@ tbody tr:last-child td {
     width: 100%;
   }
 
-  .topbar,
   .panel-title {
     align-items: flex-start;
     flex-direction: column;
@@ -2078,16 +2044,11 @@ tbody tr:last-child td {
     padding: 16px;
   }
 
-  .topbar h1 {
-    font-size: 24px;
-  }
-
   .stats-grid {
     grid-template-columns: 1fr;
   }
 
-  .top-actions,
-  .top-actions button,
+  .classes-page-actions button,
   .panel-title > button,
   .student-actions,
   .student-actions button,

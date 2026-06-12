@@ -922,26 +922,15 @@ function formatDate(value) {
     </aside>
 
     <section class="content" :class="{ 'classroom-content': activePage === 'classroom' }">
-      <header class="topbar" :class="{ 'classroom-topbar': activePage === 'classroom' }">
-        <div>
-          <p class="eyebrow">{{ selectedClass?.teacher || "本地浏览器访问" }}</p>
-          <h1>{{ activePage === "classes" ? "我的班级" : selectedClass?.name }}</h1>
-        </div>
-        <div class="top-actions">
-          <button v-if="activePage === 'classes'" class="primary" type="button" @click="classModal = true">
-            <Plus />
-            创建班级
-          </button>
-          <button v-if="activePage !== 'classes' && selectedClassId" class="ghost" type="button" @click="loadClassData">
-            <RotateCcw />
-            刷新
-          </button>
-        </div>
-      </header>
-
       <div v-if="loading" class="loading">加载中...</div>
 
       <section v-if="activePage === 'classes'" class="page">
+        <div class="classes-page-actions">
+          <button class="primary" type="button" @click="classModal = true">
+            <Plus />
+            创建班级
+          </button>
+        </div>
         <div v-if="!classes.length" class="empty">
           <Users />
           <strong>还没有班级</strong>
