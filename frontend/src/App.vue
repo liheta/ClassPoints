@@ -26,6 +26,7 @@ import {
   X,
 } from "lucide-vue-next";
 import { apiDelete, apiGet, apiPost, apiPut } from "./api";
+import { createXlsxBlob } from "./xlsx";
 import RecordList from "./components/RecordList.vue";
 import readXlsxFile from "read-excel-file/browser";
 
@@ -65,6 +66,10 @@ const groupModal = ref(false);
 const editingGroupId = ref(null);
 const ruleModal = ref(false);
 const batchModal = ref(false);
+const undoModal = ref(false);
+const undoRecordTarget = ref(null);
+const undoReason = ref("误操作");
+const undoSubmitting = ref(false);
 
 const loginForm = reactive({ name: "老师" });
 const classForm = reactive({ name: "", teacher: "" });
@@ -287,48 +292,17 @@ function exportRecordsExcel() {
     record.undoReason || "",
     formatExportDate(record.createdAt),
   ]);
-  const worksheetRows = [headers, ...rows]
-    .map((row, rowIndex) => {
-      const cells = row.map((value) => {
-        const type = typeof value === "number" ? "Number" : "String";
-        const style = rowIndex === 0 ? ' ss:StyleID="Header"' : "";
-        return `<Cell${style}><Data ss:Type="${type}">${escapeExcelXML(value)}</Data></Cell>`;
-      });
-      return `<Row>${cells.join("")}</Row>`;
-    })
-    .join("");
-  const workbook = `<?xml version="1.0" encoding="UTF-8"?>
-<?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:o="urn:schemas-microsoft-com:office:office"
- xmlns:x="urn:schemas-microsoft-com:office:excel"
- xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
- <Styles>
-  <Style ss:ID="Default"><Alignment ss:Vertical="Center"/><Font ss:FontName="Microsoft YaHei" ss:Size="11"/></Style>
-  <Style ss:ID="Header"><Alignment ss:Horizontal="Center" ss:Vertical="Center"/><Font ss:FontName="Microsoft YaHei" ss:Size="11" ss:Bold="1"/><Interior ss:Color="#EDE9FE" ss:Pattern="Solid"/></Style>
- </Styles>
- <Worksheet ss:Name="积分记录"><Table>${worksheetRows}</Table></Worksheet>
-</Workbook>`;
-  const blob = new Blob([workbook], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const blob = createXlsxBlob("积分记录", [headers, ...rows]);
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   const className = sanitizeFileName(selectedClass.value?.name || "班级");
   link.href = url;
-  link.download = `${className}-积分记录-${localDateText(new Date())}.xls`;
+  link.download = `${className}-积分记录-${localDateText(new Date())}.xlsx`;
   document.body.appendChild(link);
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
   toast(`已导出 ${records.value.length} 条积分记录`);
-}
-
-function escapeExcelXML(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
 }
 
 function sanitizeFileName(value) {
@@ -653,15 +627,36 @@ async function createBatchRecords() {
   }
 }
 
-async function undoRecord(record) {
-  const reason = window.prompt(`撤销「${record.studentName} ${formatScore(record.score)}」的原因：`, "误操作");
-  if (reason === null) return;
+function undoRecord(record) {
+  undoRecordTarget.value = record;
+  undoReason.value = "误操作";
+  undoModal.value = true;
+}
+
+function closeUndoModal() {
+  if (undoSubmitting.value) return;
+  undoModal.value = false;
+  undoRecordTarget.value = null;
+  undoReason.value = "误操作";
+}
+
+async function confirmUndoRecord() {
+  const record = undoRecordTarget.value;
+  const reason = undoReason.value.trim();
+  if (!record) return;
+  if (!reason) return toast("请输入撤销原因");
+
+  undoSubmitting.value = true;
   try {
     await apiPost(`/records/${record.id}/undo`, { reason });
+    undoModal.value = false;
+    undoRecordTarget.value = null;
     await loadClassData();
     toast("记录已撤销");
   } catch (error) {
     toast(error.message);
+  } finally {
+    undoSubmitting.value = false;
   }
 }
 
@@ -1452,6 +1447,59 @@ function formatDate(value) {
       <button class="primary wide score-submit-button" type="submit" :disabled="!batchSelectedCount">
         <Check />确认提交，为 {{ batchSelectedCount }} 名学生加分
       </button>
+    </form>
+  </div>
+
+  <div v-if="undoModal" class="modal-backdrop" @click.self="closeUndoModal">
+    <form class="modal undo-modal" @submit.prevent="confirmUndoRecord" @keydown.esc="closeUndoModal">
+      <header class="undo-modal-header">
+        <div class="undo-modal-heading">
+          <span class="undo-modal-icon"><RotateCcw /></span>
+          <div>
+            <h2>撤销积分记录</h2>
+            <p>撤销后该分值将不再计入统计</p>
+          </div>
+        </div>
+        <button class="icon" type="button" aria-label="关闭" :disabled="undoSubmitting" @click="closeUndoModal"><X /></button>
+      </header>
+
+      <div v-if="undoRecordTarget" class="undo-record-summary">
+        <div>
+          <strong>{{ undoRecordTarget.studentName }}</strong>
+          <span>{{ undoRecordTarget.reason }}</span>
+        </div>
+        <em :class="{ negative: undoRecordTarget.score < 0 }">{{ formatScore(undoRecordTarget.score) }}</em>
+        <p>{{ undoRecordTarget.ruleName }} · {{ formatDate(undoRecordTarget.createdAt) }}</p>
+      </div>
+
+      <label class="undo-reason-field">
+        撤销原因
+        <textarea
+          v-model="undoReason"
+          rows="3"
+          maxlength="100"
+          autofocus
+          placeholder="请说明为什么撤销这条记录"
+        ></textarea>
+      </label>
+      <div class="undo-reason-options" aria-label="常用撤销原因">
+        <button
+          v-for="reason in ['误操作', '重复记录', '分值有误']"
+          :key="reason"
+          :class="{ active: undoReason === reason }"
+          type="button"
+          @click="undoReason = reason"
+        >
+          {{ reason }}
+        </button>
+      </div>
+
+      <div class="undo-modal-actions">
+        <button class="ghost" type="button" :disabled="undoSubmitting" @click="closeUndoModal">取消</button>
+        <button class="undo-confirm" type="submit" :disabled="undoSubmitting || !undoReason.trim()">
+          <RotateCcw />{{ undoSubmitting ? "正在撤销..." : "确认撤销" }}
+        </button>
+      </div>
     </form>
   </div>
 
