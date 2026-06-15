@@ -1423,6 +1423,11 @@ tbody tr:last-child td {
   font-weight: 700;
 }
 
+.group-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .rule-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto auto;
@@ -2066,6 +2071,10 @@ tbody tr:last-child td {
   .group-card-icon {
     width: 48px;
     height: 48px;
+  }
+
+  .group-card-actions {
+    flex-wrap: wrap;
   }
 
   .classroom-page {

@@ -100,6 +100,20 @@ const rankScopes = [
   { value: "last7", label: "最近一周" },
   { value: "lastMonth", label: "最近一个月" },
 ];
+const studentCodeCollator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
+
+function compareStudentsByCode(left, right) {
+  const leftCode = String(left.code || "").trim();
+  const rightCode = String(right.code || "").trim();
+  if (!leftCode && rightCode) return 1;
+  if (leftCode && !rightCode) return -1;
+
+  const codeResult = studentCodeCollator.compare(leftCode, rightCode);
+  if (codeResult !== 0) return codeResult;
+
+  const nameResult = studentCodeCollator.compare(String(left.name || ""), String(right.name || ""));
+  return nameResult || Number(left.id) - Number(right.id);
+}
 
 const selectedClass = computed(() => safeArray(classes.value).find((item) => item.id === selectedClassId.value));
 const enabledRules = computed(() => safeArray(rules.value).filter((rule) => rule.enabled));
@@ -121,7 +135,10 @@ const classroomGroups = computed(() => {
     if (!groups.has(name)) groups.set(name, []);
     groups.get(name).push({ student, index });
   });
-  return [...groups.entries()].map(([name, items]) => ({ name, items }));
+  return [...groups.entries()].map(([name, items]) => ({
+    name,
+    items: items.sort((left, right) => compareStudentsByCode(left.student, right.student)),
+  }));
 });
 const selectedClassroomStudents = computed(() => {
   const selectedIds = new Set(batchForm.studentIds.map(String));
@@ -499,6 +516,18 @@ async function saveStudentGroup() {
     }
     closeGroupModal();
     await loadClassData();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function deleteStudentGroup(group) {
+  const memberText = group.studentCount ? `\n\n组内 ${group.studentCount} 名学生将转为“未分组”，学生和积分记录不会删除。` : "";
+  if (!window.confirm(`确定删除小组“${group.name}”吗？${memberText}`)) return;
+  try {
+    await apiDelete(`/groups/${group.id}`);
+    await loadClassData();
+    toast("小组已删除");
   } catch (error) {
     toast(error.message);
   }
@@ -1134,7 +1163,10 @@ function formatDate(value) {
                 <h3>{{ group.name }}</h3>
                 <span>{{ group.studentCount }} 名学生</span>
               </div>
-              <button class="ghost small" type="button" @click="openEditGroup(group)"><Pencil />编辑</button>
+              <div class="group-card-actions">
+                <button class="ghost small" type="button" @click="openEditGroup(group)"><Pencil />编辑</button>
+                <button class="ghost small danger" type="button" @click="deleteStudentGroup(group)"><Trash2 />删除</button>
+              </div>
             </article>
           </div>
           <div v-else class="empty compact">

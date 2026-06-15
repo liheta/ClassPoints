@@ -58,6 +58,7 @@ func (s *Server) RegisterRoutes(api *gin.RouterGroup) {
 	api.GET("/classes/:classID/groups", s.listStudentGroups)
 	api.POST("/classes/:classID/groups", s.createStudentGroup)
 	api.PUT("/groups/:groupID", s.updateStudentGroup)
+	api.DELETE("/groups/:groupID", s.deleteStudentGroup)
 
 	api.GET("/classes/:classID/rules", s.listRules)
 	api.POST("/classes/:classID/rules", s.createRule)
@@ -573,6 +574,42 @@ func (s *Server) updateStudentGroup(c *gin.Context) {
 		respondError(c, err)
 		return
 	}
+	s.afterMutation()
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (s *Server) deleteStudentGroup(c *gin.Context) {
+	groupID, ok := parseIDParam(c, "groupID")
+	if !ok {
+		return
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	defer tx.Rollback()
+
+	var classID int64
+	var groupName string
+	if err := tx.QueryRow(`SELECT class_id, name FROM student_groups WHERE id = ?`, groupID).Scan(&classID, &groupName); err != nil {
+		respondError(c, err)
+		return
+	}
+	if _, err := tx.Exec(`UPDATE students SET group_name = '' WHERE class_id = ? AND group_name = ?`, classID, groupName); err != nil {
+		respondError(c, err)
+		return
+	}
+	if _, err := tx.Exec(`DELETE FROM student_groups WHERE id = ?`, groupID); err != nil {
+		respondError(c, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		respondError(c, err)
+		return
+	}
+
 	s.afterMutation()
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
