@@ -58,16 +58,27 @@ func main() {
 	addr := "127.0.0.1:" + port
 	url := "http://" + addr
 	if os.Getenv("CLASSPOINTS_NO_BROWSER") != "1" {
-		go func() {
-			time.Sleep(400 * time.Millisecond)
-			_ = openBrowser(url)
-		}()
+		go openBrowserWhenReady(url)
 	}
 
 	log.Printf("班级积分系统已启动: %s", url)
 	if err := router.Run(addr); err != nil {
 		log.Fatalf("HTTP 服务退出: %v", err)
 	}
+}
+
+func openBrowserWhenReady(url string) {
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	for attempt := 0; attempt < 40; attempt++ {
+		response, err := client.Get(url)
+		if err == nil {
+			_ = response.Body.Close()
+			_ = openBrowser(url)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = openBrowser(url)
 }
 
 func mountStatic(router *gin.Engine) {

@@ -5,6 +5,7 @@ $Release = Join-Path $Root "release"
 $PackageDir = Join-Path $Release "classpoints"
 $ExePath = Join-Path $PackageDir "classpoints.exe"
 $ZipPath = Join-Path $Release "classpoints-windows.zip"
+$IconPath = Join-Path $Root "assets\classpoints.ico"
 
 if (Test-Path $PackageDir) {
   Remove-Item -LiteralPath $PackageDir -Recurse -Force
@@ -22,6 +23,9 @@ Write-Host "编译 Go 单机程序..."
 Set-Location $Root
 go mod tidy
 go build -ldflags "-s -w -H=windowsgui" -o $ExePath .\cmd\classpoints
+
+Write-Host "复制应用图标..."
+Copy-Item -LiteralPath $IconPath -Destination (Join-Path $PackageDir "classpoints.ico") -Force
 
 Write-Host "写入启动说明..."
 @"

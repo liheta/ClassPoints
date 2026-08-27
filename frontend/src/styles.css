@@ -661,8 +661,16 @@ textarea:focus {
 
 .student-groups {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+}
+
+.student-group-columns {
+  display: grid;
+  grid-template-columns: repeat(var(--classroom-group-column-count), minmax(150px, 1fr));
+  align-items: start;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
 }
 
 .drag-group-tip {
@@ -682,6 +690,7 @@ textarea:focus {
 .student-group-section {
   display: grid;
   width: 100%;
+  min-width: 0;
   gap: 8px;
   border: 2px solid rgba(255, 255, 255, 0.92);
   border-radius: 18px;
@@ -712,9 +721,9 @@ textarea:focus {
 
 .student-group-title {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .student-group-title h3 {
@@ -736,8 +745,12 @@ textarea:focus {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 8px;
+}
+
+.student-group-section .student-card-grid {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .student-group-summary em {
@@ -751,6 +764,19 @@ textarea:focus {
 .student-group-summary em.negative {
   background: #fff0f4;
   color: var(--danger);
+}
+
+.student-group-summary .group-score-button {
+  width: 100%;
+  justify-content: center;
+  border-color: #cfc7ff;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--primary-dark);
+}
+
+.student-group-summary .group-score-button:hover:not(:disabled) {
+  border-color: #9387e8;
+  background: #fff;
 }
 
 .empty-group-drop {

@@ -166,11 +166,15 @@ const classroomGroups = computed(() => {
     if (!groups.has(name)) groups.set(name, []);
     groups.get(name).push({ student, index });
   });
-  return [...groups.entries()].map(([name, items]) => ({
-    name,
-    score: groupSummaries.value.find((group) => group.name === name)?.score || 0,
-    items: items.sort((left, right) => compareStudentsByCode(left.student, right.student)),
-  }));
+  return [...groups.entries()].map(([name, items]) => {
+    const summary = groupSummaries.value.find((group) => group.name === name);
+    return {
+      name,
+      score: summary?.score || 0,
+      studentCount: summary?.studentCount || 0,
+      items: items.sort((left, right) => compareStudentsByCode(left.student, right.student)),
+    };
+  });
 });
 const selectedClassroomStudents = computed(() => {
   const selectedIds = new Set(batchForm.studentIds.map(String));
@@ -657,6 +661,17 @@ function openBatchScore(selectAll = false) {
   batchModal.value = true;
 }
 
+function openGroupBatchScore(group) {
+  const groupStudents = students.value.filter((student) => {
+    const studentGroupName = String(student.groupName || "").trim() || "未分组";
+    return studentGroupName === group.name;
+  });
+  if (!groupStudents.length) return toast(`「${group.name}」暂无学生`);
+
+  batchForm.studentIds = groupStudents.map((student) => String(student.id));
+  openBatchScore(false);
+}
+
 function closeBatchScore() {
   batchModal.value = false;
 }
@@ -1096,62 +1111,75 @@ function formatDate(value) {
 
         <section class="student-groups" aria-label="分组学生积分卡片">
           <p class="drag-group-tip"><UsersRound />按住学生卡片，拖到其他小组即可调整分组</p>
-          <section
-            v-for="group in classroomGroups"
-            :key="group.name"
-            class="student-group-section"
-            :class="{ 'drop-target': draggingStudentId && dragTargetGroup === group.name }"
-            @dragover.prevent="dragTargetGroup = group.name"
-            @drop.prevent="dropStudentOnGroup($event, group.name)"
+          <div
+            class="student-group-columns"
+            :style="{ '--classroom-group-column-count': Math.min(classroomGroups.length, 9) }"
           >
-            <header class="student-group-title">
-              <h3>{{ group.name }}</h3>
-              <div class="student-group-summary">
-                <span>{{ group.items.length }} 人</span>
-                <em :class="{ negative: group.score < 0 }">小组总分 {{ formatTotalScore(group.score) }}</em>
-              </div>
-            </header>
-            <div class="student-card-grid">
-              <div v-if="!group.items.length" class="empty-group-drop">将学生拖到这里</div>
-              <button
-                v-for="item in group.items"
-                :key="item.student.id"
-                class="student-score-card"
-                :class="{
-                  selected: batchForm.studentIds.includes(String(item.student.id)),
-                  dragging: draggingStudentId === item.student.id,
-                }"
-                draggable="true"
-                :aria-pressed="batchForm.studentIds.includes(String(item.student.id))"
-                :title="`点击选择 ${item.student.name}，拖动可调整分组`"
-                type="button"
-                @click="handleStudentCardClick(item.student)"
-                @dragstart="startStudentDrag($event, item.student)"
-                @dragend="finishStudentDrag"
-              >
-                <span class="student-no">{{ studentNumber(item.student, item.index) }}号</span>
-                <span class="cartoon-avatar" :class="avatarClass(item.student, item.index)" aria-hidden="true">
-                  <span class="avatar-ear left"></span>
-                  <span class="avatar-ear right"></span>
-                  <span class="avatar-hair-back"></span>
-                  <span class="avatar-hair"></span>
-                  <span class="avatar-accessory left"></span>
-                  <span class="avatar-accessory right"></span>
-                  <span class="avatar-face">
-                    <span class="avatar-eye left"></span>
-                    <span class="avatar-eye right"></span>
-                    <span class="avatar-blush left"></span>
-                    <span class="avatar-blush right"></span>
-                    <span class="avatar-smile"></span>
+            <section
+              v-for="group in classroomGroups"
+              :key="group.name"
+              class="student-group-section"
+              :class="{ 'drop-target': draggingStudentId && dragTargetGroup === group.name }"
+              @dragover.prevent="dragTargetGroup = group.name"
+              @drop.prevent="dropStudentOnGroup($event, group.name)"
+            >
+              <header class="student-group-title">
+                <h3>{{ group.name }}</h3>
+                <div class="student-group-summary">
+                  <span>{{ group.studentCount }} 人</span>
+                  <em :class="{ negative: group.score < 0 }">小组总分 {{ formatTotalScore(group.score) }}</em>
+                  <button
+                    class="ghost small group-score-button"
+                    type="button"
+                    :disabled="!group.studentCount"
+                    @click="openGroupBatchScore(group)"
+                  >
+                    <Sparkles />全组加分
+                  </button>
+                </div>
+              </header>
+              <div class="student-card-grid">
+                <div v-if="!group.items.length" class="empty-group-drop">将学生拖到这里</div>
+                <button
+                  v-for="item in group.items"
+                  :key="item.student.id"
+                  class="student-score-card"
+                  :class="{
+                    selected: batchForm.studentIds.includes(String(item.student.id)),
+                    dragging: draggingStudentId === item.student.id,
+                  }"
+                  draggable="true"
+                  :aria-pressed="batchForm.studentIds.includes(String(item.student.id))"
+                  :title="`点击选择 ${item.student.name}，拖动可调整分组`"
+                  type="button"
+                  @click="handleStudentCardClick(item.student)"
+                  @dragstart="startStudentDrag($event, item.student)"
+                  @dragend="finishStudentDrag"
+                >
+                  <span class="student-no">{{ studentNumber(item.student, item.index) }}号</span>
+                  <span class="cartoon-avatar" :class="avatarClass(item.student, item.index)" aria-hidden="true">
+                    <span class="avatar-ear left"></span>
+                    <span class="avatar-ear right"></span>
+                    <span class="avatar-hair-back"></span>
+                    <span class="avatar-hair"></span>
+                    <span class="avatar-accessory left"></span>
+                    <span class="avatar-accessory right"></span>
+                    <span class="avatar-face">
+                      <span class="avatar-eye left"></span>
+                      <span class="avatar-eye right"></span>
+                      <span class="avatar-blush left"></span>
+                      <span class="avatar-blush right"></span>
+                      <span class="avatar-smile"></span>
+                    </span>
+                    <span class="avatar-body"><span class="avatar-collar"></span></span>
                   </span>
-                  <span class="avatar-body"><span class="avatar-collar"></span></span>
-                </span>
-                <strong>{{ item.student.name }}</strong>
-                <em :class="{ negative: item.student.score < 0 }">{{ formatTotalScore(item.student.score) }}</em>
-                <span v-if="batchForm.studentIds.includes(String(item.student.id))" class="student-selected-mark"><Check /></span>
-              </button>
-            </div>
-          </section>
+                  <strong>{{ item.student.name }}</strong>
+                  <em :class="{ negative: item.student.score < 0 }">{{ formatTotalScore(item.student.score) }}</em>
+                  <span v-if="batchForm.studentIds.includes(String(item.student.id))" class="student-selected-mark"><Check /></span>
+                </button>
+              </div>
+            </section>
+          </div>
           <div v-if="!classroomStudents.length" class="empty compact">暂无匹配学生</div>
         </section>
       </section>
