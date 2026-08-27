@@ -126,10 +126,41 @@ const filteredStudents = computed(() => {
 });
 const topThree = computed(() => safeArray(ranking.value).slice(0, 3));
 const classroomStudents = computed(() => filteredStudents.value);
+const groupSummaries = computed(() => {
+  const groups = new Map();
+  studentGroups.value.forEach((group) => {
+    groups.set(group.name, {
+      name: group.name,
+      studentCount: 0,
+      score: 0,
+    });
+  });
+
+  students.value.forEach((student) => {
+    const name = String(student.groupName || "").trim() || "未分组";
+    if (!groups.has(name)) {
+      groups.set(name, {
+        name,
+        studentCount: 0,
+        score: 0,
+      });
+    }
+    const group = groups.get(name);
+    group.studentCount += 1;
+    group.score += Number(student.score || 0);
+  });
+
+  return [...groups.values()];
+});
+const groupScoreRanking = computed(() => {
+  return [...groupSummaries.value].sort((left, right) => {
+    return right.score - left.score || studentCodeCollator.compare(left.name, right.name);
+  });
+});
 const classroomGroups = computed(() => {
   const groups = new Map();
-  studentGroups.value.forEach((group) => groups.set(group.name, []));
-  groups.set("未分组", []);
+  groupSummaries.value.forEach((group) => groups.set(group.name, []));
+  if (!groups.has("未分组")) groups.set("未分组", []);
   classroomStudents.value.forEach((student, index) => {
     const name = String(student.groupName || "").trim() || "未分组";
     if (!groups.has(name)) groups.set(name, []);
@@ -137,6 +168,7 @@ const classroomGroups = computed(() => {
   });
   return [...groups.entries()].map(([name, items]) => ({
     name,
+    score: groupSummaries.value.find((group) => group.name === name)?.score || 0,
     items: items.sort((left, right) => compareStudentsByCode(left.student, right.student)),
   }));
 });
@@ -1009,6 +1041,25 @@ function formatDate(value) {
             </div>
           </section>
         </div>
+        <section class="panel group-ranking-panel">
+          <div class="panel-title">
+            <div>
+              <h2>小组总分排名</h2>
+              <span>按各小组学生累计总分排名</span>
+            </div>
+          </div>
+          <div v-if="groupScoreRanking.length" class="group-ranking-list">
+            <article v-for="(group, index) in groupScoreRanking" :key="group.name">
+              <span class="rank">{{ index + 1 }}</span>
+              <div class="group-ranking-name">
+                <strong>{{ group.name }}</strong>
+                <small>{{ group.studentCount }} 名学生</small>
+              </div>
+              <em :class="{ negative: group.score < 0 }">{{ formatTotalScore(group.score) }}</em>
+            </article>
+          </div>
+          <div v-else class="empty compact">暂无小组排行数据</div>
+        </section>
       </section>
 
       <section v-if="activePage === 'classroom'" class="page classroom-page">
@@ -1055,7 +1106,10 @@ function formatDate(value) {
           >
             <header class="student-group-title">
               <h3>{{ group.name }}</h3>
-              <span>{{ group.items.length }} 人</span>
+              <div class="student-group-summary">
+                <span>{{ group.items.length }} 人</span>
+                <em :class="{ negative: group.score < 0 }">小组总分 {{ formatTotalScore(group.score) }}</em>
+              </div>
             </header>
             <div class="student-card-grid">
               <div v-if="!group.items.length" class="empty-group-drop">将学生拖到这里</div>

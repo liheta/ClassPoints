@@ -661,6 +661,7 @@ textarea:focus {
 
 .student-groups {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 
@@ -680,6 +681,7 @@ textarea:focus {
 
 .student-group-section {
   display: grid;
+  width: 100%;
   gap: 8px;
   border: 2px solid rgba(255, 255, 255, 0.92);
   border-radius: 18px;
@@ -728,6 +730,27 @@ textarea:focus {
   padding: 4px 10px;
   font-size: 13px;
   font-weight: 800;
+}
+
+.student-group-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.student-group-summary em {
+  border-radius: 999px;
+  background: #fff0ca;
+  color: #9b6b17;
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.student-group-summary em.negative {
+  background: #fff0f4;
+  color: var(--danger);
 }
 
 .empty-group-drop {
@@ -1235,6 +1258,65 @@ textarea:focus {
 .podium article:nth-child(3) {
   border-color: #efc3a8;
   background: linear-gradient(145deg, #fff6ef, #ffe7d8);
+}
+
+.group-ranking-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.group-ranking-list article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 76px;
+  border: 2px solid #ece8f8;
+  border-radius: 17px;
+  background: linear-gradient(145deg, #fff, #faf8ff);
+  padding: 12px 14px;
+}
+
+.group-ranking-list article:nth-child(1) {
+  border-color: #f7d46d;
+  background: linear-gradient(145deg, #fff9df, #fff0b9);
+}
+
+.group-ranking-list article:nth-child(2) {
+  border-color: #bad9ed;
+  background: linear-gradient(145deg, #f3fbff, #e2f3ff);
+}
+
+.group-ranking-list article:nth-child(3) {
+  border-color: #efc3a8;
+  background: linear-gradient(145deg, #fff6ef, #ffe7d8);
+}
+
+.group-ranking-name {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.group-ranking-name strong {
+  overflow: hidden;
+  color: #514b79;
+  font-size: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-ranking-name small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.group-ranking-list em {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 6px 10px;
+  white-space: nowrap;
 }
 
 em,
